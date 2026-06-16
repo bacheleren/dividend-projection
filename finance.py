@@ -3,32 +3,31 @@ import yfinance as yf
 import pandas as pd
 import datetime
 import plotly.graph_objects as go
+import numpy as np
 
 st.set_page_config(page_title="Valuation por Dividendos", layout="wide")
 
 st.title("📊 Precificação e Projeção Dinâmica de Dividendos")
 
 # Isola a chamada em uma função com cache do Streamlit (Validade de 1 hora)
-# Isso impede que o app faça novas requisições ao mexer nos sliders
 @st.cache_data(ttl=3600, show_spinner="Sincronizando dados com o mercado...")
 def buscar_dados_api(ticker_str):
-    # Removido o session=session, deixando o yfinance trabalhar livremente
     ticker = yf.Ticker(ticker_str)
     info = ticker.info
     dividendos = ticker.dividends
-    # Salva o momento exato em que o dado real foi puxado da API
+    # Puxamos os demonstrativos financeiros para achar o Lucro Por Ação (EPS) histórico
+    financials = ticker.financials 
+    
     horario_busca = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-    return info, dividendos, horario_busca
+    return info, dividendos, financials, horario_busca
 
-# Input do usuário (sem o botão de atualizar para evitar abusos na API)
 ticker_input = st.text_input("Digite o Ticker (sem .SA):", value="BBAS3").strip().upper()
 
 if ticker_input:
     ticker_sa = f"{ticker_input}.SA"
     
     try:
-        # A busca passa pela barreira de cache do Streamlit
-        info, dividendos, horario_atualizacao = buscar_dados_api(ticker_sa)
+        info, dividendos, financials, horario_atualizacao = buscar_dados_api(ticker_sa)
         
         preco_atual = info.get('currentPrice') or info.get('regularMarketPrice')
         
@@ -60,9 +59,53 @@ if ticker_input:
                     dados_pagos[ano] = float(div_por_ano.get(ano, 0.0))
                 pago_ano_atual = float(div_por_ano.get(ano_atual, 0.0))
             
+            # --- PROCESSAMENTO DO PAYOUT HISTÓRICO ---
+            eps_historico = {}
+            if financials is not None and not financials.empty:
+                # Procura a linha de EPS (Lucro por Ação) básico ou diluído
+                for eps_label in ['Basic EPS', 'Diluted EPS']:
+                    if eps_label in financials.index:
+                        eps_row = financials.loc[eps_label]
+                        for data_balanco, eps_val in eps_row.items():
+                            if pd.notna(eps_val):
+                                eps_historico[data_balanco.year] = float(eps_val)
+                        break
+
+            payouts_anuais = {}
+            payouts_validos = []
+            
+            for ano in anos_historicos:
+                div = dados_pagos[ano]
+                eps = eps_historico.get(ano, 0.0)
+                
+                if eps > 0 and div > 0: # Só calcula se houve lucro e distribuição
+                    payout = div / eps
+                    # Evita distorções bizarras de dados (ex: payout > 200%)
+                    payout_real = min(payout, 2.0) 
+                    payouts_anuais[ano] = payout_real
+                    payouts_validos.append(payout_real)
+                else:
+                    payouts_anuais[ano] = None
+
+            # Calcula a média para o slider
+            if payouts_validos:
+                media_payout_hist = sum(payouts_validos) / len(payouts_validos)
+            else:
+                # Fallback: Tenta pegar o payout atual do info, ou fixa em 50%
+                media_payout_hist = info.get('payoutRatio', 0.5) or 0.5
+            
+            # Formata para % e garante que fique entre os limites do slider
+            media_payout_pct = int(round(media_payout_hist * 100))
+            media_payout_pct = min(max(media_payout_pct, 10), 100)
+
             # --- PARÂMETROS ---
             st.subheader("Parâmetros para Projeção Futura")
-            payout_simulado = st.slider("Payout Estimado (%)", min_value=10, max_value=100, value=50, step=5) / 100.0
+            # Agora o slider já nasce com a média histórica calculada!
+            payout_simulado = st.slider(
+                f"Payout Estimado (%) - Base Histórica: {media_payout_pct}%", 
+                min_value=10, max_value=100, value=media_payout_pct, step=5
+            ) / 100.0
+            
             yield_desejado = st.slider("Dividend Yield Mínimo Desejado (%)", min_value=4.0, max_value=12.0, value=6.0, step=0.5) / 100.0
             
             # --- PROJEÇÕES ---
@@ -74,7 +117,16 @@ if ticker_input:
             dividendo_ano_seguinte_projetado = lpa_projetado_proximo * payout_simulado
             
             # --- GRÁFICO COM TEXTOS INTERNOS ---
-            anos_grafico = [str(ano) for ano in anos_historicos] + [str(ano_atual), f"{ano_seguinte} (Proj)"]
+            # Cria os labels do eixo X incluindo o Payout entre parênteses
+            anos_grafico = []
+            for ano in anos_historicos:
+                payout_ano = payouts_anuais.get(ano)
+                if payout_ano is not None:
+                    anos_grafico.append(f"{ano}<br>({payout_ano * 100:.0f}%)")
+                else:
+                    anos_grafico.append(str(ano))
+                    
+            anos_grafico.extend([str(ano_atual), f"{ano_seguinte} (Proj)"])
             
             valores_historicos = [dados_pagos[ano] for ano in anos_historicos] + [pago_ano_atual, 0.0]
             valores_restante_ano = [0.0] * len(anos_historicos) + [restante_ano_atual, 0.0]
@@ -99,8 +151,8 @@ if ticker_input:
             ))
             
             fig.update_layout(
-                barmode='stack', title=f"Evolução de Proventos e Projeções - {ticker_input}",
-                xaxis_title="Ano", yaxis_title="Dividendos por Ação (R$)", template="plotly_white",
+                barmode='stack', title=f"Evolução de Proventos e Payout Histórico - {ticker_input}",
+                xaxis_title="Ano (Payout Realizado)", yaxis_title="Dividendos por Ação (R$)", template="plotly_white",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
             
