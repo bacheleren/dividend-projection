@@ -3,49 +3,54 @@ import yfinance as yf
 import pandas as pd
 import datetime
 import plotly.graph_objects as go
+import requests_cache
 
 st.set_page_config(page_title="Valuation por Dividendos", layout="wide")
 
 st.title("📊 Precificação e Projeção Dinâmica de Dividendos")
 
-col_input, col_botao = st.columns([3, 1])
+# 1. Configuração do Cache do YFinance (Evita Rate Limit HTTP 429)
+session = requests_cache.CachedSession('yfinance.cache')
+session.headers['User-agent'] = 'my-program/1.0'
 
-with col_input:
-    ticker_input = st.text_input("Digite o Ticker (sem .SA):", value="BBAS3").strip().upper()
+# 2. Isola a chamada em uma função com cache do Streamlit (Validade de 1 hora)
+@st.cache_data(ttl=3600, show_spinner="Sincronizando dados com o mercado...")
+def buscar_dados_api(ticker_str):
+    ticker = yf.Ticker(ticker_str, session=session)
+    info = ticker.info
+    dividendos = ticker.dividends
+    # Salva o momento exato em que o dado real foi puxado
+    horario_busca = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    return info, dividendos, horario_busca
 
-with col_botao:
-    st.write(" ")
-    st.write(" ")
-    atualizar = st.button("🔄 Atualizar Dados")
+# Input do usuário (sem o botão de atualizar)
+ticker_input = st.text_input("Digite o Ticker (sem .SA):", value="BBAS3").strip().upper()
 
 if ticker_input:
     ticker_sa = f"{ticker_input}.SA"
     
     try:
-        ticker = yf.Ticker(ticker_sa)
-        info = ticker.info
+        # A busca agora passa pela barreira de cache
+        info, dividendos, horario_atualizacao = buscar_dados_api(ticker_sa)
         
         preco_atual = info.get('currentPrice') or info.get('regularMarketPrice')
         
         if not preco_atual:
             st.error("Não foi possível obter a cotação atual deste ativo. Verifique se o ticker está correto.")
         else:
-            horario_atualizacao = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            
             col_preco, col_time = st.columns([1, 2])
             with col_preco:
                 st.metric(label=f"Preço Atual de {ticker_input}", value=f"R$ {preco_atual:.2f}")
             with col_time:
                 st.write(" ")
                 st.write(" ")
-                st.caption(f"🕒 **Dados sincronizados em:** {horario_atualizacao}")
+                st.caption(f"🕒 **Última sincronização:** {horario_atualizacao} (Cache ativo)")
             
             ano_atual = datetime.datetime.now().year
             anos_historicos = list(range(ano_atual - 5, ano_atual)) 
             ano_seguinte = ano_atual + 1 
             
             # --- PROCESSAMENTO DOS DIVIDENDOS ---
-            dividendos = ticker.dividends
             dados_pagos = {ano: 0.0 for ano in anos_historicos}
             pago_ano_atual = 0.0
             
@@ -78,7 +83,6 @@ if ticker_input:
             valores_restante_ano = [0.0] * len(anos_historicos) + [restante_ano_atual, 0.0]
             valores_proximo_ano = [0.0] * len(anos_historicos) + [0.0, dividendo_ano_seguinte_projetado]
             
-            # Função para não exibir "R$ 0.00" nas barras vazias do gráfico empilhado
             def format_text(valores):
                 return [f"R$ {v:.2f}" if v > 0 else "" for v in valores]
 
@@ -105,10 +109,9 @@ if ticker_input:
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # --- VALUATION DINÂMICO ---
+            # --- VALUATION DINÂMICO (DROPDOWN) ---
             st.subheader("Cálculo de Preço-Teto e Margem de Segurança")
             
-            # Dropdown de seleção de método
             opcao_valuation = st.selectbox(
                 "Escolha a base de dividendos para precificar a ação:",
                 [
@@ -118,7 +121,6 @@ if ticker_input:
                 ]
             )
             
-            # Lógica do Dropdown
             media_5_anos = sum(dados_pagos.values()) / len(anos_historicos) if anos_historicos else 0.0
             total_ano_atual = pago_ano_atual + restante_ano_atual
             
@@ -132,11 +134,9 @@ if ticker_input:
                 dividendo_base = dividendo_ano_seguinte_projetado
                 label_dividendo = f"Projetado ({ano_seguinte})"
             
-            # Cálculos
             preco_teto = dividendo_base / yield_desejado
             margem_seguranca = ((preco_teto / preco_atual) - 1) * 100
             
-            # Exibição dos KPIs
             col1, col2, col3 = st.columns(3)
             col1.metric(f"Div. Base: {label_dividendo}", f"R$ {dividendo_base:.2f}")
             col2.metric("Preço-Teto Máximo", f"R$ {preco_teto:.2f}")
@@ -147,4 +147,4 @@ if ticker_input:
                 col3.metric("Margem de Segurança", f"{margem_seguranca:.1f}%", delta="Cara (Acima do Teto)", delta_color="inverse")
                 
     except Exception as e:
-        st.error(f"Erro ao processar dados do ticker {ticker_input}: {e}")
+        st.error(f"Erro ao processar dados do ticker {ticker_input}. Caso o problema persista, tente novamente mais tarde. Detalhes: {e}")
