@@ -6,95 +6,109 @@ import plotly.graph_objects as object_patch
 
 st.set_page_config(page_title="Valuation por Dividendos", layout="wide")
 
-st.title("📊 Precificação e Projeção de Dividendos")
-st.markdown("Insira o ticker de uma ação da B3 (ex: `BBAS3`, `VALE3`, `PETR4`) para visualizar o histórico e o preço-teto projetado.")
+st.title("📊 Precificação e Projeção Dinâmica de Dividendos")
+st.markdown("Este painel calcula o histórico completo, os dividendos parciais do ano corrente com projeção de fechamento, e a estimativa para o próximo ano.")
 
-# Input do usuário
 ticker_input = st.text_input("Digite o Ticker (sem .SA):", value="BBAS3").strip().upper()
 
 if ticker_input:
     ticker_sa = f"{ticker_input}.SA"
     
     try:
-        # Busca dados do Yahoo Finance
         ticker = yf.Ticker(ticker_sa)
         info = ticker.info
         
-        # 1. Informações de Preço Atual
         preco_atual = info.get('currentPrice') or info.get('regularMarketPrice')
         
         if not preco_atual:
-            st.error("Não foi possível obter a cotação atual deste ativo. Verifique se o ticker está correto.")
+            st.error("Não foi possível obter a cotação atual deste ativo.")
         else:
             st.metric(label=f"Preço Atual de {ticker_input}", value=f"R$ {preco_atual:.2f}")
             
-            # --- CAPTURA DE DADOS (HISTÓRICO) ---
-            dividendos = ticker.dividends
+            # Definição dos anos com base no ano corrente (2026)
             ano_atual = datetime.datetime.now().year
+            anos_historicos = list(range(ano_atual - 5, ano_atual)) # 2021 a 2025
+            ano_seguinte = ano_atual + 1 # 2027
             
-            # Filtrar últimos 5 anos completos (excluindo o ano atual para não pegar dados parciais)
-            anos_historico = list(range(ano_atual - 5, ano_atual))
+            # --- PROCESSAMENTO DOS DIVIDENDOS PAGOS ---
+            dividendos = ticker.dividends
+            dados_pagos = {ano: 0.0 for ano in anos_historicos}
+            pago_ano_atual = 0.0
             
-            dados_historicos = {}
             if not dividendos.empty:
                 df_div = dividendos.to_frame().reset_index()
                 df_div['Ano'] = df_div['Date'].dt.year
-                # Agrupa por ano e soma os dividendos pagos
                 div_por_ano = df_div.groupby('Ano')['Dividends'].sum()
-                for ano in anos_historico:
-                    dados_historicos[ano] = float(div_por_ano.get(ano, 0.0))
-            else:
-                for ano in anos_historico:
-                    dados_historicos[ano] = 0.0
+                
+                # Preenche histórico (2021-2025)
+                for ano in anos_historicos:
+                    dados_pagos[ano] = float(div_por_ano.get(ano, 0.0))
+                
+                # Captura o parcial já pago/provisonado em 2026
+                pago_ano_atual = float(div_por_ano.get(ano_atual, 0.0))
             
-            # --- CAPTURA DE DADOS (PROJEÇÃO FUTURA) ---
-            # O Yahoo Finance fornece o consenso de analistas para o Lucro Por Ação do próximo ano (forwardEps)
-            lpa_projetado = info.get('forwardEps')
-            
-            st.subheader("Configurações de Projeção futura")
-            # Deixamos o usuário ajustar o payout simulado para o próximo ano
-            payout_simulado = st.slider("Payout Estimado para o Próximo Ano (%)", min_value=10, max_value=100, value=50, step=5) / 100.0
+            # --- CONFIGURAÇÕES DE PROJEÇÃO (INTERFACE) ---
+            st.subheader("Parâmetros para Projeção Futura")
+            payout_simulado = st.slider("Payout Estimado (%)", min_value=10, max_value=100, value=50, step=5) / 100.0
             yield_desejado = st.slider("Dividend Yield Mínimo Desejado (%)", min_value=4.0, max_value=12.0, value=6.0, step=0.5) / 100.0
             
-            # Calcula o dividendo projetado com base no lucro futuro e payout do usuário
-            if lpa_projetado and lpa_projetado > 0:
-                dividendo_projetado = lpa_projetado * payout_simulado
-                projecao_real = True
-            else:
-                # Se o Yahoo não tiver a projeção (comum em empresas menores), usamos a média histórica como aproximação
-                valores_validos = [v for v in dados_historicos.values() if v > 0]
-                dividendo_projetado = sum(valores_validos) / len(valores_validos) if valores_validos else 0.0
-                projecao_real = False
-                st.warning("⚠️ Projeção do mercado indisponível para este ativo. Usando a média histórica dos dividendos como estimativa.")
+            # --- PROJEÇÃO ANO ATUAL (2026) ---
+            # Usamos o trailingEps (lucro dos últimos 12 meses) como base para o fechamento do ano corrente
+            lpa_atual_est = info.get('trailingEps') or (preco_atual * 0.1) # Fallback caso não encontre
+            total_est_ano_atual = lpa_atual_est * payout_simulado
             
-            # --- CONSTRUÇÃO DO GRÁFICO ---
-            anos_grafico = [str(ano) for ano in anos_historico] + [f"{ano_atual + 1} (Projetado)"]
-            valores_grafico = [dados_historicos[ano] for ano in anos_historico] + [dividendo_projetado]
+            # O restante a ser pago é o total estimado menos o que já foi pago de fato
+            restante_ano_atual = max(0.0, total_est_ano_atual - pago_ano_atual)
+            fechamento_ano_atual_projetado = pago_ano_atual + restante_ano_atual
             
-            # Cores diferentes para diferenciar o histórico da projeção
-            cores = ['#4682B4'] * 5 + ['#2E8B57']
+            # --- PROJEÇÃO PRÓXIMO ANO (2027) ---
+            lpa_projetado_proximo = info.get('forwardEps') or (lpa_atual_est * 1.05)
+            dividendo_ano_seguinte_projetado = lpa_projetado_proximo * payout_simulado
             
-            fig = object_patch.Figure(data=[
-                object_patch.Bar(x=anos_grafico, y=valores_grafico, marker_color=cores, text=[f"R$ {v:.2f}" for v in valores_grafico], textposition='auto')
-            ])
+            # --- CONSTRUÇÃO DO GRÁFICO DE BARRAS EMPILHADAS ---
+            anos_grafico = [str(ano) for ano in anos_historicos] + [str(ano_atual), f"{ano_seguinte} (Projetado)"]
+            
+            # Para criar o efeito visual de 'Pago' vs 'A receber' no ano atual, usamos barras empilhadas
+            valores_historicos = [dados_pagos[ano] for ano in anos_historicos] + [pago_ano_atual, 0.0]
+            valores_restante_ano = [0.0] * len(anos_historicos) + [restante_ano_atual, 0.0]
+            valores_proximo_ano = [0.0] * len(anos_historicos) + [0.0, dividendo_ano_seguinte_projetado]
+            
+            fig = object_patch.Figure()
+            
+            # Adiciona série de dividendos já confirmados/pagos
+            fig.add_trace(object_patch.Bar(
+                x=anos_grafico, y=valores_historicos, 
+                name="Histórico / Pago no Ano", marker_color='#4682B4'
+            ))
+            # Adiciona série do complemento projetado para o ano atual
+            fig.add_trace(object_patch.Bar(
+                x=anos_grafico, y=valores_restante_ano, 
+                name="Projeção Restante (Ano Atual)", marker_color='#FFA500'
+            ))
+            # Adiciona série do próximo ano totalmente projetado
+            fig.add_trace(object_patch.Bar(
+                x=anos_grafico, y=valores_proximo_ano, 
+                name="Projeção Próximo Ano", marker_color='#2E8B57'
+            ))
             
             fig.update_layout(
-                title=f"Histórico e Projeção de Dividendos por Ação - {ticker_input}",
+                barmode='stack',
+                title=f"Evolução de Proventos e Projeções - {ticker_input}",
                 xaxis_title="Ano",
-                yaxis_title="Dividendos (R$)",
-                template="plotly_white"
+                yaxis_title="Dividendos por Ação (R$)",
+                template="plotly_white",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # --- CÁLCULO DE VALUATION (VALOR JUSTO / PREÇO TETO) ---
-            preco_teto = dividendo_projetado / yield_desejado
+            # --- VALUATION BASEADO NA PROJEÇÃO DO PRÓXIMO ANO ---
+            preco_teto = dividendo_ano_seguinte_projetado / yield_desejado
             margem_seguranca = ((preco_teto / preco_atual) - 1) * 100
             
-            st.subheader("Análise de Preço-Teto (Método de Bazin)")
-            
+            st.subheader(f"Análise de Preço-Teto para {ano_seguinte}")
             col1, col2, col3 = st.columns(3)
-            col1.metric("Dividendo Projetado (Próximo Ano)", f"R$ {dividendo_projetado:.2f}")
+            col1.metric(f"Div. Projetado ({ano_seguinte})", f"R$ {dividendo_ano_seguinte_projetado:.2f}")
             col2.metric("Preço-Teto Máximo", f"R$ {preco_teto:.2f}")
             
             if margem_seguranca > 0:
@@ -103,4 +117,4 @@ if ticker_input:
                 col3.metric("Margem de Segurança", f"{margem_seguranca:.1f}%", delta="Cara (Acima do Teto)", delta_color="inverse")
                 
     except Exception as e:
-        st.error(f"Erro ao processar o ticker. Certifique-se de digitar um código válido na B3. Detalhes: {e}")
+        st.error(f"Erro ao processar dados: {e}")
