@@ -3,34 +3,31 @@ import yfinance as yf
 import pandas as pd
 import datetime
 import plotly.graph_objects as go
-import requests_cache
 
 st.set_page_config(page_title="Valuation por Dividendos", layout="wide")
 
 st.title("📊 Precificação e Projeção Dinâmica de Dividendos")
 
-# 1. Configuração do Cache do YFinance (Evita Rate Limit HTTP 429)
-session = requests_cache.CachedSession('yfinance.cache')
-session.headers['User-agent'] = 'my-program/1.0'
-
-# 2. Isola a chamada em uma função com cache do Streamlit (Validade de 1 hora)
+# Isola a chamada em uma função com cache do Streamlit (Validade de 1 hora)
+# Isso impede que o app faça novas requisições ao mexer nos sliders
 @st.cache_data(ttl=3600, show_spinner="Sincronizando dados com o mercado...")
 def buscar_dados_api(ticker_str):
-    ticker = yf.Ticker(ticker_str, session=session)
+    # Removido o session=session, deixando o yfinance trabalhar livremente
+    ticker = yf.Ticker(ticker_str)
     info = ticker.info
     dividendos = ticker.dividends
-    # Salva o momento exato em que o dado real foi puxado
+    # Salva o momento exato em que o dado real foi puxado da API
     horario_busca = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     return info, dividendos, horario_busca
 
-# Input do usuário (sem o botão de atualizar)
+# Input do usuário (sem o botão de atualizar para evitar abusos na API)
 ticker_input = st.text_input("Digite o Ticker (sem .SA):", value="BBAS3").strip().upper()
 
 if ticker_input:
     ticker_sa = f"{ticker_input}.SA"
     
     try:
-        # A busca agora passa pela barreira de cache
+        # A busca passa pela barreira de cache do Streamlit
         info, dividendos, horario_atualizacao = buscar_dados_api(ticker_sa)
         
         preco_atual = info.get('currentPrice') or info.get('regularMarketPrice')
@@ -147,4 +144,4 @@ if ticker_input:
                 col3.metric("Margem de Segurança", f"{margem_seguranca:.1f}%", delta="Cara (Acima do Teto)", delta_color="inverse")
                 
     except Exception as e:
-        st.error(f"Erro ao processar dados do ticker {ticker_input}. Caso o problema persista, tente novamente mais tarde. Detalhes: {e}")
+        st.error(f"Erro ao processar dados do ticker {ticker_input}. Caso o problema persista, verifique se o ativo digitado está correto. Detalhes: {e}")
